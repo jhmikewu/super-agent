@@ -51,7 +51,7 @@ type HttpHandler = (req: unknown, res: unknown) => Promise<void>
 let http: HttpHandler
 async function api(method: string, path: string): Promise<{ status: number; body: unknown }> {
   let status = 0, text = ''
-  const req = { method, url: `/orchestrator/api/${path}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1' } }
+  const req = { method, url: `/orchestrator/api/${path}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1' }, socket: { remoteAddress: '127.0.0.1' } }
   await http(req, { writeHead: (code: number) => { status = code }, end: (data: string) => { text = data } })
   return { status, body: JSON.parse(text) }
 }
@@ -1302,7 +1302,7 @@ it('refuses a settings save with an unknown model or a Source kind that is not i
   const request = async (method: string, path: string, body?: unknown) => {
     let status = 0, text = ''
     const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
-    const req = { method, url: `/orchestrator/api/${path}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1' }, async *[Symbol.asyncIterator]() { yield* chunks } }
+    const req = { method, url: `/orchestrator/api/${path}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1' }, socket: { remoteAddress: '127.0.0.1' }, async *[Symbol.asyncIterator]() { yield* chunks } }
     await http(req, { writeHead: (code: number) => { status = code }, end: (data: string) => { text = data } })
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }
@@ -1322,6 +1322,27 @@ it('refuses a settings save with an unknown model or a Source kind that is not i
     baseRevision: runtime.prompts.current().revision })).toMatchObject({ status: 400, body: { code: 'unknownPromptPart' } })
   expect(await request('GET', 'prompts?revision=99')).toMatchObject({ status: 404, body: { code: 'unknownPromptRevision' } })
   expect(await request('GET', 'threads/%E0%A4%A')).toEqual({ status: 400, body: { error: 'A path segment has a malformed escape' } })
+})
+
+it('moves the running main Session to a newly saved orchestrator model, and leaves it alone when only the worker model changes', async () => {
+  const save = async (block: 'eval' | 'executor', model: unknown) => {
+    const value = { ...runtime.store.settings()[block], model }, revision = runtime.store.blockRevision(block)
+    const req = { method: 'PUT', url: `/orchestrator/api/settings/${block}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1' }, socket: { remoteAddress: '127.0.0.1' },
+      async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ value, revision })) } }
+    let status = 0
+    await http(req, { writeHead: (code: number) => { status = code }, end: () => {} })
+    return status
+  }
+  const main = agents.get(runtime.masterId) as unknown as { session: { append: ReturnType<typeof vi.fn> } }
+  const selections = () => main.session.append.mock.calls.filter(([type]) => type === 'model/selection').map(([, data]) => data)
+  const before = selections().length
+  expect(await save('executor', { provider: 'magpie-codex', model: 'codex/gpt-6.2-sol' })).toBe(200)
+  expect(selections()).toHaveLength(before)
+  expect(await save('eval', { provider: 'magpie-claude', model: 'claude/claude-opus-5-5', reasoningEffort: 'high' })).toBe(200)
+  expect(selections().slice(before)).toEqual([{ provider: 'magpie-claude', model: 'claude/claude-opus-5-5', reasoningEffort: 'high' }])
+  // Inherit leaves the main Session on the model it has.
+  expect(await save('eval', null)).toBe(200)
+  expect(selections()).toHaveLength(before + 1)
 })
 
 it('records a report, the PR it binds and its relay together, or none of them', async () => {
@@ -1384,7 +1405,7 @@ it('applies a changed prompt size limit to the next save and request without a r
   const put = async (config: unknown) => {
     let status = 0, text = ''
     const chunks = [Buffer.from(JSON.stringify({ config, baseRevision: next.prompts.current().revision }))]
-    const req = { method: 'PUT', url: '/orchestrator/api/prompts', headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1' }, async *[Symbol.asyncIterator]() { yield* chunks } }
+    const req = { method: 'PUT', url: '/orchestrator/api/prompts', headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1' }, socket: { remoteAddress: '127.0.0.1' }, async *[Symbol.asyncIterator]() { yield* chunks } }
     await http(req, { writeHead: (code: number) => { status = code }, end: (data: string) => { text = data } })
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }

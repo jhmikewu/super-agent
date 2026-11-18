@@ -65,12 +65,17 @@ def ps(*options, check=False):
 
 def running(pid, profile):
     """Return whether `pid` is currently running the DSH service for `profile` (`ps -p` returns nothing once exited)."""
-    return any(found == pid and name in ('node', 'dsh') and serves(args, profile) for found, name, args in ps('-p', str(pid)))
+    return any(found == pid and dsh_process(name, args) and serves(args, profile) for found, name, args in ps('-p', str(pid)))
+
+
+def dsh_process(name, args):
+    """Return whether a `ps` row is a Node or DSH process; Node 24 names its main thread `MainThread`, which `ucomm` reports."""
+    return name in ('node', 'dsh') or bool(args) and os.path.basename(args[0]) in ('node', 'dsh')
 
 
 def processes(profile):
     """Return PIDs of all running DSH service processes for `profile`, including instances started outside this script and the recorded `service.pid` while still running."""
-    found = [pid for pid, name, args in ps('-ax', check=True) if name in ('node', 'dsh') and serves(args, profile)]
+    found = [pid for pid, name, args in ps('-ax', check=True) if dsh_process(name, args) and serves(args, profile)]
     try:
         pid = int((control(profile) / 'service.pid').read_text())
     except (OSError, ValueError):
@@ -174,7 +179,11 @@ def start(args):
         log.touch()
         prune_logs(args.profile)
         # `exec` replaces the shell so the pane PID printed by tmux is the DSH service process itself.
-        command = ('umask 077; exec ' + shlex.join([dsh, '--profile', args.profile, '--no-open'])
+        # The model routes `scripts/magpie.ts sync` generated for this profile, when it has them.
+        home = Path(os.environ.get('DSH_HOME') or Path.home() / '.dsh')
+        overlay = home / 'profiles' / args.profile / 'magpie.patch.yml'
+        patch = ['--patch', str(overlay)] if overlay.is_file() else []
+        command = ('umask 077; exec ' + shlex.join([dsh, '--profile', args.profile, *patch, '--no-open'])
                    + ' >> ' + shlex.quote(str(log)) + ' 2>&1')
         # Reuse an existing tmux session without disturbing other windows.
         target = ['new-window', '-t', '=' + session + ':'] if exists else ['new-session', '-s', session]
@@ -206,13 +215,29 @@ def start(args):
     raise RuntimeError('Startup health check timed out; inspect the log. Any running process was left intact.')
 
 
+def profile_url(profile):
+    """The panel URL from the `webserver` entry of the profile's cordis.patch.yml, else http://127.0.0.1:3082."""
+    host, port = '127.0.0.1', '3082'
+    try:
+        text = (Path(os.environ.get('DSH_HOME') or Path.home() / '.dsh') / 'profiles' / profile / 'cordis.patch.yml').read_text()
+    except OSError:
+        text = ''
+    entry = re.search(r'^- id: webserver\n((?:[ \t].*\n?|\n)*)', text, re.M)
+    if entry:
+        found = re.search(r'^\s+host:\s*[\'"]?([^\s\'"#]+)', entry.group(1), re.M)
+        host = found.group(1) if found else host
+        found = re.search(r'^\s+port:\s*(\d+)', entry.group(1), re.M)
+        port = found.group(1) if found else port
+    return 'http://' + ('[' + host + ']' if ':' in host else host) + ':' + port
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['start', 'stop', 'restart', 'status'])
     parser.add_argument('--profile', default=os.environ.get('DSH_SUPERAGENT_PROFILE') or 'superagent',
                         help='DSH profile that loads dsh-superagent; its tmux session is dsh-<profile>.')
-    parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or 'http://127.0.0.1:3082',
-                        help='Health-check URL; override after changing the profile port.')
+    parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL'),
+                        help="Health-check URL; defaults to the profile's webserver host and port.")
     parser.add_argument('--timeout', type=float, default=60, help='Startup timeout in seconds.')
     parser.add_argument('--stop-timeout', type=float, default=300,
                         help='Graceful shutdown timeout in seconds; running Executor Sessions finish their step first.')
@@ -223,6 +248,7 @@ def main():
         parser.error('--timeout and --stop-timeout must be positive')
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', args.profile):
         parser.error('--profile must be a DSH profile name')
+    args.url = args.url or profile_url(args.profile)
     os.umask(0o077)
     with (control(args.profile) / 'operation.lock').open('a') as lock:
         try:

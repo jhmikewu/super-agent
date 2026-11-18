@@ -10,16 +10,17 @@ import { SetupError } from '../src/setup.ts'
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
 /** Mount management HTTP routes on a fake web server and return a request helper that includes default panel headers. */
-function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1') {
+function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1', connection?: { admit: (req: unknown) => unknown }) {
   let handler: Handler = async () => {}
-  const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
+  const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } },
+    get: (name: string) => name === 'connection' ? connection : undefined }
   registerHttp(ctx as never, { ready: Promise.resolve(), ...runtime } as unknown as HttpHost)
-  return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
+  return async (method: string, path: string, body?: unknown, headers: Headers = {}, remoteAddress: string | undefined = '127.0.0.1') => {
     let status = 0, text = ''
     const chunks = body === undefined ? [] : [Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))]
     const sent = Object.fromEntries(Object.entries({ host: '127.0.0.1:3082', 'x-orchestrator-request': '1', ...headers }).filter(([,
       value]) => value !== undefined))
-    const req = { method, url: `/orchestrator/api/${path}`, headers: sent, async *[Symbol.asyncIterator]() { yield* chunks } }
+    const req = { method, url: `/orchestrator/api/${path}`, headers: sent, socket: { remoteAddress }, async *[Symbol.asyncIterator]() { yield* chunks } }
     await handler(req, { writeHead: (code: number) => { status = code }, end: (data: string) => { text = data } })
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }
@@ -76,8 +77,29 @@ it('answers only a same-origin request from the panel on the loopback address', 
       body: { error: 'Same-origin management request required' } })
   }
   expect(await post({ host: 'localhost:3082', origin: 'http://localhost:3082' })).toMatchObject({ status: 200 })
-  // Management routes require a loopback Web server.
-  expect(() => serve({}, '0.0.0.0')).toThrow('Orchestrator management requires a loopback Web server')
+  // Another machine cannot pass as local by writing a loopback Host.
+  expect(await call('POST', 'threads/github%3A1/unsubscribe', undefined, {}, '100.64.0.9')).toMatchObject({ status: 401 })
+})
+
+it('on a network address, answers this machine as on loopback and another machine only once DSH admits its sign-in', async () => {
+  const signedIn = new Set<unknown>()
+  const call = serve({ sessions: { delivery: async () => 'injected' }, engine: { unsubscribe: () => true } }, '100.122.222.74',
+    { admit: req => signedIn.has(req) ? { peer: {} } : { rejection: 401 } })
+  const own = { host: '100.122.222.74:3082', origin: 'http://100.122.222.74:3082' }
+  const post = (headers: Headers, from: string) => call('POST', 'threads/github%3A1/unsubscribe', undefined, headers, from)
+  // The scripts on this machine reach the bound address from it, or loopback, with no cookie.
+  expect(await post(own, '100.122.222.74')).toMatchObject({ status: 200 })
+  expect(await post(own, '::ffff:100.122.222.74')).toMatchObject({ status: 200 })
+  expect(await post({}, '127.0.0.1')).toMatchObject({ status: 200 })
+  // A browser on the tailnet without DSH's cookie, or with a forged loopback Host, is refused; a foreign origin is refused first.
+  expect(await post(own, '100.64.0.9')).toEqual({ status: 401, body: { error: 'Sign in first: open the URL dsh printed, with its token, in this browser' } })
+  expect(await post({}, '100.64.0.9')).toMatchObject({ status: 401 })
+  expect(await post({ ...own, origin: 'http://evil.example' }, '100.64.0.9')).toMatchObject({ status: 403 })
+  expect(await post(own, '')).toMatchObject({ status: 401 })
+  // DSH's refusal of a Host it does not trust passes through as 403.
+  const strict = serve({ sessions: { delivery: async () => 'injected' }, engine: { unsubscribe: () => true } }, '100.122.222.74',
+    { admit: () => ({ rejection: 403 }) })
+  expect(await strict('POST', 'threads/github%3A1/unsubscribe', undefined, own, '100.64.0.9')).toMatchObject({ status: 403 })
 })
 
 it('answers a prompt save that lost a race with 409, and a settings body over 128 KiB with 400', async () => {

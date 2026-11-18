@@ -2,7 +2,7 @@
  * Context-free UI primitives styled with `--dsw-alias-*` tokens.
  * Mirrors DSH ui-primitives markup and keyboard behavior without coupling to its internal package API.
  */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type KeyboardEvent,
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type SelectHTMLAttributes, type KeyboardEvent,
   type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
@@ -127,6 +127,10 @@ export function SegmentedControl<V extends string>({ options, value, onChange, l
 export function Input({ icon, className, ...rest }: { icon?: ReactNode; className?: string } & InputHTMLAttributes<HTMLInputElement>) {
   return <span className={cx('dt-input', className)}>{icon !== undefined && <span
     className="dt-input-icon">{icon}</span>}<input {...rest} /></span>
+}
+
+export function Select({ className, children, ...rest }: { className?: string } & SelectHTMLAttributes<HTMLSelectElement>) {
+  return <span className={cx('dt-input', className)}><select {...rest}>{children}</select></span>
 }
 
 export function Switch({ checked, onChange, label,

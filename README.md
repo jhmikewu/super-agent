@@ -8,6 +8,30 @@ dsh-superagent is a proactive coding agent for one GitHub repository, packaged a
 
 It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
 
+## This fork: local models through magpie
+
+This copy of [deepseek-ai/dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype) runs on the models a local magpie gateway serves (Claude, GPT/Codex, DeepSeek, …), and lets you choose the **orchestrator** (main Session) and the **workers** (one Executor Session per Ticket) independently.
+
+Prerequisites: Node.js 22.19+ or 24, pnpm, tmux, git, a running `magpie web` (default `http://localhost:3425`), and the DSH CLI. First run only, from this checkout:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.2.1-rc.3 --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs
+pnpm install && pnpm build
+dsh superagent --from-default-profile web --dump-config > /dev/null    # creates ~/.dsh/profiles/superagent
+dsh plugin --profile superagent add "link:$PWD"
+cp examples/profile.cordis.patch.yml ~/.dsh/profiles/superagent/cordis.patch.yml   # then set stateDir in it
+```
+
+Then:
+
+```sh
+node scripts/magpie.ts sync                      # magpie's models → DSH routes in the superagent profile
+scripts/dsh-superagent start
+node scripts/magpie.ts roles --orchestrator claude/claude-opus-5-5@high --worker codex/gpt-6.2-sol@medium
+```
+
+Or pick both in the panel: **Settings → Eval → Orchestrator model** and **Settings → Execution → Worker model**. [docs/009-models.md](docs/009-models.md) explains the routes, the defaults and when a change applies.
+
 ## Setup
 
 Setup has many steps, so an agent does it with you. Ask your coding agent:
@@ -29,6 +53,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [006 Deployment](docs/006-deployment.md): manual setup, configuration, upgrades and troubleshooting
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
+- [009 Models](docs/009-models.md): the orchestrator and worker models, and the local magpie gateway
 
 ## Development
 

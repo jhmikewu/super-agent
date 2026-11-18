@@ -1,4 +1,4 @@
-/** Loopback-only management HTTP routes with same-origin enforcement for the web panel. */
+/** Management HTTP routes with same-origin enforcement for the web panel; requests from other machines also need DSH's sign-in. */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -34,7 +34,7 @@ export interface HttpHost {
   readonly sourceLinks: Pick<TextCache, 'entries'>
   readonly sources: SourceRegistry
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'preview' | 'save' | 'defaultChanged'>
-  readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
+  readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'applyOrchestratorModel'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
   readonly executor: Pick<DshExecutor, 'activeCount'>
@@ -72,11 +72,25 @@ async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<un
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(value))
 }
-export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number): boolean {
+const LOOPBACK = /^(127\.|::1$|::ffff:127\.)/
+const plain = (address: string) => address.replace(/^::ffff:/, '')
+/** Accepts the panel's own origin: a loopback name, or the address the Web server is bound to. */
+export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number, bound = '127.0.0.1'): boolean {
   const host = req.headers.host
-  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return false
+  const own = LOOPBACK.test(bound) ? [] : [`${bound.includes(':') ? `[${bound}]` : bound}:${port}`]
+  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}` && !own.includes(host ?? '')) return false
   return req.headers['x-orchestrator-request'] === '1' && (req.headers.origin === undefined || req.headers.origin === `http://${host}`)
 }
+/**
+ * Whether the connection itself comes from this machine: a loopback peer, or one using the bound address, which only this
+ * machine holds. The `Host` header is not evidence, since any client can write it. A request without a socket is not local.
+ */
+export function fromThisMachine(req: { socket?: { remoteAddress?: string | undefined } }, bound: string): boolean {
+  const address = req.socket?.remoteAddress
+  return !!address && (LOOPBACK.test(address) || plain(address) === plain(bound))
+}
+/** DSH's own browser and API authentication (`dsh-client-connection`): the signed cookie its `?token=` sign-in sets. */
+interface Admission { admit(req: IncomingMessage): { peer: unknown } | { rejection: number } }
 /** Maps errors to HTTP status codes and structured payloads that the panel localizes in the interface language. */
 function failure(error: unknown): [number, Record<string, unknown>] {
   if (error instanceof z.ZodError) {
@@ -228,13 +242,21 @@ function match(table: Routes, method: string, segments: string[]) {
   return undefined
 }
 export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
-  if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')
   const table = routes(runtime)
+  const bound = ctx.webServer.host
   const disposers = [
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
-      if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
+      if (!sameOrigin(req, ctx.webServer.port, bound)) { json(res, 403, { error: 'Same-origin management request required' }); return }
+      // Another machine is admitted only as DSH admits it: the operator's signed-in browser, or an API client of /connect.
+      if (!fromThisMachine(req, bound)) {
+        const admission = (ctx.get('connection') as Admission | undefined)?.admit(req)
+        if (!admission || 'rejection' in admission) {
+          json(res, admission?.rejection === 403 ? 403 : 401, { error: 'Sign in first: open the URL dsh printed, with its token, in this browser' })
+          return
+        }
+      }
       try {
         await runtime.ready
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))

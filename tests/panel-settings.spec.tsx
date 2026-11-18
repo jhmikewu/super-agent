@@ -29,6 +29,8 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   await click(find(zh['tab.settings'], '.dt-status-head button'))
   await click(zh['mode.auto'])
   await type(field<HTMLInputElement>(zh.evalTimeout), '180')
+  // An id the catalog does not list is entered by hand under "Other".
+  await type(all('.dt-model select')[0] as HTMLSelectElement, '\u0000custom')
   const [provider, model] = all('.dt-model input')
   await type(provider as HTMLInputElement, 'worker-provider'); await type(model as HTMLInputElement, 'worker-model')
   await click(zh.save)
@@ -48,10 +50,13 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   await click('DSH_SUPERAGENT_DIR')
   expect(field<HTMLTextAreaElement>(zh.prepareCommand).value).toBe('git worktree add "$DSH_SUPERAGENT_DIR"')
   await type(field<HTMLInputElement>(zh.blockedCommands), 'gh-personal  gh.other')
-  const [workerProvider, workerModel, effort] = all('.dt-model input')
-  await type(workerProvider as HTMLInputElement, 'worker-provider'); await type(workerModel as HTMLInputElement,
-    'worker-model'); await type(effort as HTMLInputElement, 'high')
-  expect([...document.querySelectorAll('#dt-worker-model-efforts option')].map(option => option.getAttribute('value'))).toEqual(['high'])
+  // A model is chosen from the catalog, grouped by provider, and its efforts are offered for it alone.
+  const [route, effort] = all('.dt-model select') as HTMLSelectElement[]
+  expect([...route!.querySelectorAll('optgroup')].map(group => group.label)).toEqual(['Worker provider'])
+  expect(effort!.disabled).toBe(true)
+  await type(route!, 'worker-provider\u0000worker-model')
+  expect([...(all('.dt-model select')[1] as HTMLSelectElement).options].map(option => option.value)).toEqual(['', 'high'])
+  await type(all('.dt-model select')[1] as HTMLSelectElement, 'high')
   await click(zh.save)
   expect(server.settings.executor).toEqual({ maxWorkers: 5, directory: '/srv/work',
     prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], model: { provider: 'worker-provider',
@@ -144,4 +149,20 @@ it('lists the settings groups stages first, opens each stage\'s group from its s
   await remount()
   await click(tab(zh['tab.settings']))
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['promptPart.runtime/work'])
+})
+
+it('shows a saved model the catalog no longer lists, and drops an effort the newly chosen model does not offer', async () => {
+  server.settings = { ...server.settings, executor: { ...server.settings.executor, model: { provider: 'gone', model: 'old-model',
+    reasoningEffort: 'ultra' } } }
+  await mount()
+  await click(zh['tab.execution'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  const [route, effort] = all('.dt-model select') as HTMLSelectElement[]
+  expect(route!.selectedOptions[0]?.textContent).toBe('gone / old-model（不在目录中）')
+  expect(effort!.value).toBe('ultra')
+  await type(route!, 'worker-provider\u0000worker-model')
+  expect((all('.dt-model select')[1] as HTMLSelectElement).value).toBe('')
+  await type(all('.dt-model select')[0] as HTMLSelectElement, '')
+  await click(zh.save)
+  expect(server.settings.executor.model).toBeNull()
 })

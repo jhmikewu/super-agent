@@ -4,7 +4,7 @@ import { cloneElement, createContext, useContext, useEffect, useId, useLayoutEff
 import type { ApiResponse } from '../app/api.ts'
 import type { FieldSpec, Localized } from '../sources/kind.ts'
 import { usePoll, type HistoryView, type Settings, type SettingsView, type SourceView } from './api.ts'
-import { Button, DisclosureRow, Icon, InfoTip, Input, SegmentedControl, Switch } from './controls.tsx'
+import { Button, DisclosureRow, Icon, InfoTip, Input, SegmentedControl, Select, Switch } from './controls.tsx'
 import { useDraft } from './draft.tsx'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { settingsRoute } from './route.ts'
@@ -69,18 +69,33 @@ function SwitchRow({ label, hint, checked,
   </div>
 }
 type RoleModel = Settings['eval']['model']
+const CUSTOM = '\u0000custom'
+const routeKey = (provider: string, model: string) => `${provider}\u0000${model}`
+/** A role's model: one route from the live catalog (grouped by provider) and its reasoning effort, or the DSH default when empty. */
 export function ModelField({ id, value, onChange }: { id: string; value: RoleModel; onChange: (next: RoleModel) => void }) {
   const { t, call } = usePanel()
   const [catalog, setCatalog] = useState<ApiResponse<'GET models'>>()
   const [error, setError] = useState<string>()
+  const [custom, setCustom] = useState(false)
   useEffect(() => { call('GET models').then(setCatalog, failure => setError(errorText(failure))) }, [call])
   const current = { provider: value?.provider ?? '', model: value?.model ?? '', effort: value?.reasoningEffort ?? '' }
   const set = (next: Partial<typeof current>) => {
     const { provider, model, effort } = { ...current, ...next }
     onChange(provider.trim() || model.trim() || effort.trim() ? { provider, model, ...effort ? { reasoningEffort: effort } : {} } : null)
   }
-  const models = catalog?.groups.find(group => group.id === current.provider.trim())?.models ?? []
+  const groups = catalog?.groups ?? []
+  const entry = groups.find(group => group.id === current.provider.trim())?.models.find(model => model.id === current.model.trim())
+  const efforts = entry?.reasoning?.efforts ?? []
   const fallback = catalog?.default
+  const selected = custom ? CUSTOM : current.provider || current.model ? routeKey(current.provider, current.model) : ''
+  const choose = (key: string) => {
+    if (key === CUSTOM) return setCustom(true)
+    setCustom(false)
+    const [provider = '', model = ''] = key.split('\u0000')
+    const next = groups.find(group => group.id === provider)?.models.find(item => item.id === model)?.reasoning?.efforts ?? []
+    // Keep the effort only where the newly chosen model offers it.
+    set({ provider, model, effort: next.some(item => item.id === current.effort) ? current.effort : '' })
+  }
   const input = (name: keyof typeof current, label: string, placeholder: string) => <Field label={label}>
     <Input list={`${id}-${name}s`} spellCheck={false} placeholder={placeholder} value={current[name]}
       onChange={event => set({ [name]: event.target.value })} />
@@ -89,17 +104,37 @@ export function ModelField({ id, value, onChange }: { id: string; value: RoleMod
     <Hint>{fallback ? t('defaultModel', { model: `${fallback.provider} / ${fallback.model}${fallback.reasoningEffort
       ? ` · ${fallback.reasoningEffort}` : ''}` }) : t('defaultModelUnavailable')}</Hint>
     {error && <p className="dt-error">{t('modelCatalogError', { error })}</p>}
-    <div className="dt-grid3">
-      {input('provider', t('modelProvider'), t('modelInherit'))}{input('model', t('modelName'), t('modelInherit'))}{input('effort',
-        t('modelEffort'), t('modelEffortDefault'))}
-    </div>
-    <datalist id={`${id}-providers`}>{catalog?.groups.map(group => <option key={group.id}
-      value={group.id}>{group.name}</option>)}</datalist>
-    <datalist id={`${id}-models`}>{models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</datalist>
-    <datalist id={`${id}-efforts`}>
-      {(models.find(model => model.id === current.model.trim())?.reasoning?.efforts ?? []).map(effort => <option key={effort.id}
-        value={effort.id}>{effort.name}</option>)}
-    </datalist>
+    {!custom && <div className="dt-model-row">
+      <Field label={t('modelName')}>
+        <Select value={selected} onChange={event => choose(event.target.value)}>
+          <option value="">{t('modelInherit')}</option>
+          {selected && !entry && <option value={selected}>{t('modelNotListed', { model: `${current.provider} / ${current.model}` })}</option>}
+          {groups.map(group => <optgroup key={group.id} label={group.name}>
+            {group.models.map(model => <option key={model.id} value={routeKey(group.id, model.id)}>{model.name === model.id
+              ? model.id : `${model.name} · ${model.id}`}</option>)}
+          </optgroup>)}
+          <option value={CUSTOM}>{t('modelCustom')}</option>
+        </Select>
+      </Field>
+      <Field label={t('modelEffort')}>
+        <Select value={current.effort} disabled={!selected} onChange={event => set({ effort: event.target.value })}>
+          <option value="">{t('modelEffortDefault')}</option>
+          {current.effort && !efforts.some(item => item.id === current.effort) && <option value={current.effort}>{current.effort}</option>}
+          {efforts.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </Select>
+      </Field>
+    </div>}
+    {custom && <>
+      <div className="dt-grid3">
+        {input('provider', t('modelProvider'), t('modelInherit'))}{input('model', t('modelName'), t('modelInherit'))}{input('effort',
+          t('modelEffort'), t('modelEffortDefault'))}
+      </div>
+      <div><Button variant="ghost" onClick={() => setCustom(false)}>{t('modelPickFromList')}</Button></div>
+      <datalist id={`${id}-providers`}>{groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}</datalist>
+      <datalist id={`${id}-models`}>{(groups.find(group => group.id === current.provider.trim())?.models ?? []).map(model => <option
+        key={model.id} value={model.id}>{model.name}</option>)}</datalist>
+      <datalist id={`${id}-efforts`}>{efforts.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</datalist>
+    </>}
   </div>
 }
 
